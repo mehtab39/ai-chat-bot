@@ -1,0 +1,43 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+env/
+
+# Local binary/output
+*.log
+*.db
+*.sqlite3
+
+# OS junk files
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+
+# Python virtual environment folders
+bin/
+include/
+lib/
+Lib/
+
+# IDE/editor configs
+.vscode/
+.idea/
+
+# Pip metadata
+*.egg-info/
+dist/
+build/
+
+# Pytest cache
+.pytest_cache/
+
+# MyPy, Coverage, etc.
+.mypy_cache/
+coverage.xml
+htmlcov/
