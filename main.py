@@ -13,12 +13,11 @@ import google.generativeai as genai
 
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY")
+if not API_KEY:
+    raise Exception("GOOGLE_API_KEY not found in .env file")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-if not API_KEY:
-    raise Exception("GOOGLE_API_KEY not found in .env file")
 
 genai.configure(api_key=API_KEY)
 try:
@@ -36,7 +35,6 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize Gemini model: {e}")
     model = None
 
-
 app = FastAPI(title="Gemini + useChat Stream API", version="1.0.0")
 
 app.add_middleware(
@@ -47,43 +45,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class Message(BaseModel):
-    id: Optional[str] = None
-    role: str  # "user", "assistant", or "system"
+    role: str  # "user" or "assistant"
     content: str
-    parts: Optional[List[Dict[str, Any]]] = None
-
 
 class ChatRequest(BaseModel):
     messages: List[Message]
     options: Dict[str, Any] = {}
     id: Optional[str] = None
-    systemInstruction: Optional[str] = None 
+    systemInstruction: Optional[str] = None
+
+class RegisterSessionRequest(BaseModel):
+    systemInstruction: str
 
 
 current_system_instruction: Optional[str] = None
 
-
+# Format messages
 def format_messages_for_gemini(messages: List[Message]) -> List[Dict[str, Any]]:
     gemini_messages = []
-
-    filtered_messages = [msg for msg in messages if msg.role != "system"]
-
-    for i, msg in enumerate(filtered_messages):
+    for i, msg in enumerate(messages):
         role = "user" if msg.role == "user" else "model"
         content = msg.content
-
-        if i == 0 and role == "user":
+        if i == 0 and role == "user" and current_system_instruction:
             content = f"{current_system_instruction}\n{content}"
-
         gemini_messages.append({
             "role": role,
             "parts": [{"text": content}]
         })
     return gemini_messages
 
-
+# Stream generator
 async def generate_data_stream(messages: List[Message]) -> AsyncGenerator[str, None]:
     try:
         if not model:
@@ -94,15 +86,9 @@ async def generate_data_stream(messages: List[Message]) -> AsyncGenerator[str, N
             yield "0:I'm here to help!\n"
             return
 
-        current_user_message = gemini_messages[-1]["parts"][0]["text"]
-
-        chat_history = gemini_messages[:-1]
-
-        chat = model.start_chat(history=chat_history)
-
         response = await asyncio.to_thread(
-            chat.send_message,
-            current_user_message,
+            model.generate_content,
+            gemini_messages,
             stream=True
         )
 
@@ -110,8 +96,8 @@ async def generate_data_stream(messages: List[Message]) -> AsyncGenerator[str, N
             if chunk.text:
                 token = chunk.text.strip()
                 if token:
-                    yield f'0:{json.dumps(token)}\n' 
-                    await asyncio.sleep(0.01)  
+                    yield f'0:{json.dumps(token)}\n'
+                    await asyncio.sleep(0.01)
 
         yield f'd:{json.dumps({"finishReason": "stop"})}\n'
 
@@ -120,8 +106,6 @@ async def generate_data_stream(messages: List[Message]) -> AsyncGenerator[str, N
         yield f'0:{json.dumps("Sorry, something went wrong.")}\n'
         yield f'd:{json.dumps({"finishReason": "error"})}\n'
 
-
-# ----- Chat Endpoint -----
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     if not request.messages:
@@ -142,16 +126,6 @@ async def chat_endpoint(request: ChatRequest):
         }
     )
 
-
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "timestamp": time.time()}
-
-
-class RegisterSessionRequest(BaseModel):
-    systemInstruction: str
-
 @app.post("/register_session")
 async def register_session(body: RegisterSessionRequest):
     global current_system_instruction
@@ -159,6 +133,11 @@ async def register_session(body: RegisterSessionRequest):
     logger.info("🔧 Updated global system instruction")
     return {"message": "System instruction registered"}
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": time.time()}
+
+# Main runner
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
