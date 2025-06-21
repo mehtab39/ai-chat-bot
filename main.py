@@ -11,18 +11,15 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Load environment variables
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 if not API_KEY:
     raise Exception("GOOGLE_API_KEY not found in .env file")
 
-# Configure Gemini
 genai.configure(api_key=API_KEY)
 try:
     model = genai.GenerativeModel(
@@ -44,7 +41,7 @@ app = FastAPI(title="Gemini + useChat Stream API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,20 +59,27 @@ class ChatRequest(BaseModel):
     messages: List[Message]
     options: Dict[str, Any] = {}
     id: Optional[str] = None
+    systemInstruction: Optional[str] = None 
+
+
+current_system_instruction: Optional[str] = None
 
 
 def format_messages_for_gemini(messages: List[Message]) -> List[Dict[str, Any]]:
     gemini_messages = []
-    for msg in messages:
-        if msg.role == "assistant":
-            role = "model"
-        elif msg.role == "system":
-            continue  # Ignore system messages here
-        else:
-            role = "user"
+
+    filtered_messages = [msg for msg in messages if msg.role != "system"]
+
+    for i, msg in enumerate(filtered_messages):
+        role = "user" if msg.role == "user" else "model"
+        content = msg.content
+
+        if i == 0 and role == "user":
+            content = f"{current_system_instruction}\n{content}"
+
         gemini_messages.append({
             "role": role,
-            "parts": [{"text": msg.content}]
+            "parts": [{"text": content}]
         })
     return gemini_messages
 
@@ -90,33 +94,26 @@ async def generate_data_stream(messages: List[Message]) -> AsyncGenerator[str, N
             yield "0:I'm here to help!\n"
             return
 
-        # Extract the last user message
-        system_msg = next((m.content for m in messages if m.role == "system"), None)
-        last_user_msg = gemini_messages[-1]["parts"][0]["text"]
-        if system_msg:
-            last_user_msg = f"System: {system_msg}\nUser: {last_user_msg}"
+        current_user_message = gemini_messages[-1]["parts"][0]["text"]
 
-        # Start Gemini chat
-        chat = model.start_chat(history=gemini_messages[:-1])
+        chat_history = gemini_messages[:-1]
 
-        # Get stream response (in a separate thread)
+        chat = model.start_chat(history=chat_history)
+
         response = await asyncio.to_thread(
             chat.send_message,
-            last_user_msg,
+            current_user_message,
             stream=True
         )
 
-        total_tokens = 0
         for chunk in response:
             if chunk.text:
                 token = chunk.text.strip()
                 if token:
-                    total_tokens += 1
-                    yield f'0:{json.dumps(token)}\n'  # Wrap text in JSON string (e.g. "Hello")
-                   # await asyncio.sleep(0.01)  # Optional: smooth streaming
+                    yield f'0:{json.dumps(token)}\n' 
+                    await asyncio.sleep(0.01)  
 
-        # Send metadata at end
-        yield f'd:{json.dumps({"finishReason": "stop", "usage": {"promptTokens": total_tokens, "completionTokens": total_tokens}})}\n'
+        yield f'd:{json.dumps({"finishReason": "stop"})}\n'
 
     except Exception as e:
         logger.error(f"Streaming error: {e}")
@@ -138,7 +135,7 @@ async def chat_endpoint(request: ChatRequest):
         stream(),
         media_type="text/plain",
         headers={
-            "x-vercel-ai-data-stream": "v1",  # REQUIRED for useChat
+            "x-vercel-ai-data-stream": "v1",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
@@ -146,10 +143,21 @@ async def chat_endpoint(request: ChatRequest):
     )
 
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
+
+class RegisterSessionRequest(BaseModel):
+    systemInstruction: str
+
+@app.post("/register_session")
+async def register_session(body: RegisterSessionRequest):
+    global current_system_instruction
+    current_system_instruction = body.systemInstruction.strip()
+    logger.info("🔧 Updated global system instruction")
+    return {"message": "System instruction registered"}
 
 if __name__ == "__main__":
     import uvicorn
