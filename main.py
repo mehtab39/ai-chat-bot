@@ -1,13 +1,13 @@
-import os
-import time
-import asyncio
-import logging
-import json
-from typing import List, Dict, Any, Optional, AsyncGenerator
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import List, Dict, Any, Optional, AsyncGenerator
+import asyncio
+import os
+import time
+import logging
+import json
 from dotenv import load_dotenv
 import google.generativeai as genai
 
@@ -45,43 +45,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Message(BaseModel):
-    role: str  # "user" or "assistant"
-    content: str
+class Attachment(BaseModel):
+    url: str
+    contentType: str
+    name: Optional[str] = None
 
 class ChatRequest(BaseModel):
-    messages: List[Message]
-    options: Dict[str, Any] = {}
+    role: str
+    content: str
+    experimental_attachments: Optional[List[Attachment]] = []
     id: Optional[str] = None
+    createdAt: Optional[str] = None
+    parts: Optional[List[Dict[str, Any]]] = []
+    options: Dict[str, Any] = {}
     systemInstruction: Optional[str] = None
 
 class RegisterSessionRequest(BaseModel):
     systemInstruction: str
 
-
 current_system_instruction: Optional[str] = None
 
-# Format messages
-def format_messages_for_gemini(messages: List[Message]) -> List[Dict[str, Any]]:
-    gemini_messages = []
-    for i, msg in enumerate(messages):
-        role = "user" if msg.role == "user" else "model"
-        content = msg.content
-        if i == 0 and role == "user" and current_system_instruction:
-            content = f"{current_system_instruction}\n{content}"
-        gemini_messages.append({
-            "role": role,
-            "parts": [{"text": content}]
-        })
-    return gemini_messages
+def format_last_message_for_gemini(message: ChatRequest) -> List[Dict[str, Any]]:
+    role = "user"
+    parts = []
 
-# Stream generator
-async def generate_data_stream(messages: List[Message]) -> AsyncGenerator[str, None]:
+    if current_system_instruction:
+        parts.append({"text": current_system_instruction})
+    
+    if message.content:
+        parts.append({"text": message.content})
+
+    for att in message.experimental_attachments or []:
+            parts.append({"inline_data": {
+                "mime_type": att.contentType,
+                "data": f"<<{att.url}>>" 
+            }})
+
+    return [{"role": role, "parts": parts}]
+
+async def generate_data_stream(message: ChatRequest) -> AsyncGenerator[str, None]:
     try:
         if not model:
             raise HTTPException(status_code=500, detail="Model not initialized")
 
-        gemini_messages = format_messages_for_gemini(messages)
+        gemini_messages = format_last_message_for_gemini(message)
         if not gemini_messages:
             yield "0:I'm here to help!\n"
             return
@@ -108,11 +115,8 @@ async def generate_data_stream(messages: List[Message]) -> AsyncGenerator[str, N
 
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="No messages provided")
-
     async def stream():
-        async for chunk in generate_data_stream(request.messages):
+        async for chunk in generate_data_stream(request):
             yield chunk
 
     return StreamingResponse(
@@ -137,7 +141,6 @@ async def register_session(body: RegisterSessionRequest):
 async def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
-# Main runner
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
